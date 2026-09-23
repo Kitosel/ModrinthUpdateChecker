@@ -25,6 +25,7 @@
 package de.clickism.modrinthupdatechecker;
 
 import com.google.gson.*;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.BufferedReader;
@@ -33,6 +34,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Utility class to check for newer versions of a project hosted on Modrinth.
@@ -47,6 +50,9 @@ public class ModrinthUpdateChecker {
     @Nullable
     private final String minecraftVersion;
 
+    private final Logger logger = Logger.getLogger("UpdateChecker");
+    private final boolean debug;
+
     /**
      * Create a new update checker for the given project.
      * This will check the latest version for the given loader and any minecraft version.
@@ -55,7 +61,11 @@ public class ModrinthUpdateChecker {
      * @param loader    the loader
      */
     public ModrinthUpdateChecker(String projectId, String loader) {
-        this(projectId, loader, null);
+        this(projectId, loader, null, false);
+    }
+
+    public ModrinthUpdateChecker(String projectId, String loader, boolean logAndDebug) {
+        this(projectId, loader, null, logAndDebug);
     }
 
     /**
@@ -67,9 +77,14 @@ public class ModrinthUpdateChecker {
      * @param minecraftVersion the minecraft version, or null for any version
      */
     public ModrinthUpdateChecker(String projectId, String loader, @Nullable String minecraftVersion) {
+        this(projectId, loader, minecraftVersion, false);
+    }
+
+    public ModrinthUpdateChecker(String projectId, String loader, @Nullable String minecraftVersion, boolean logAndDebug) {
         this.projectId = projectId;
         this.loader = loader;
         this.minecraftVersion = minecraftVersion;
+        this.debug = logAndDebug;
     }
 
     /**
@@ -81,12 +96,23 @@ public class ModrinthUpdateChecker {
     public void checkVersion(Consumer<String> consumer) {
         CompletableFuture.runAsync(() -> {
             try {
+                if (projectId == null || projectId.isEmpty()) {
+                    if (debug) logger.warning("[UpdateChecker] ERROR: project ID is empty");
+                    return;
+                }
+
+                if (debug) logger.info("[UpdateChecker] Sending an inquiry to Modrinth regarding the project: " + projectId);
+
                 URL url = new URL(API_URL.replace("{id}", projectId));
                 HttpURLConnection connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod("GET");
                 connection.setRequestProperty("User-Agent", "ModrinthUpdateChecker-Java8");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
 
                 int statusCode = connection.getResponseCode();
+                if (debug) logger.info("[UpdateChecker] Respond from HTTP: " + statusCode);
+
                 if (statusCode != 200) {
                     connection.disconnect();
                     return;
@@ -99,14 +125,28 @@ public class ModrinthUpdateChecker {
                         responseBuilder.append(line);
                     }
 
-                    JsonArray versionsArray = JsonParser.parseString(responseBuilder.toString()).getAsJsonArray();
-                    String latestVersion = getLatestVersion(versionsArray);
-                    if (latestVersion == null) return;
-                    consumer.accept(latestVersion);
+                    JsonParser parser = new JsonParser();
+                    JsonArray versionsArray = parser.parse(responseBuilder.toString()).getAsJsonArray();
+
+                    if (debug) logger.info("[UpdateChecker] Founded versions: " + versionsArray.size());
+
+                    if (versionsArray.size() == 0) {
+                        return;
+                    }
+
+                    JsonObject latestVersionObj = versionsArray.get(0).getAsJsonObject();
+                    String latestVersion = latestVersionObj.get("version_number").getAsString();
+
+                    if (debug) logger.info("[UpdateChecker] Success, Found newer version: " + latestVersion);
+
+                    if (latestVersion != null) {
+                        consumer.accept(latestVersion);
+                    }
                 } finally {
                     connection.disconnect();
                 }
-            } catch (Exception ignored) {
+            } catch (Throwable t) {
+                if (debug) logger.log(Level.SEVERE, "[UpdateChecker] FATAL ERROR WHILE CONNECTING:", t);
             }
         });
     }
