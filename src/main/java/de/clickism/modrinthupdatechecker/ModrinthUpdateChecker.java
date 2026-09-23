@@ -27,14 +27,16 @@ package de.clickism.modrinthupdatechecker;
 import com.google.gson.*;
 import org.jetbrains.annotations.Nullable;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 /**
  * Utility class to check for newer versions of a project hosted on Modrinth.
+ * Backported to Java 8.
  */
 public class ModrinthUpdateChecker {
 
@@ -77,23 +79,36 @@ public class ModrinthUpdateChecker {
      * @param consumer the consumer
      */
     public void checkVersion(Consumer<String> consumer) {
-        try {
-            HttpClient client = HttpClient.newHttpClient();
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(API_URL.replace("{id}", projectId)))
-                    .GET()
-                    .build();
+        CompletableFuture.runAsync(() -> {
+            try {
+                URL url = new URL(API_URL.replace("{id}", projectId));
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setRequestProperty("User-Agent", "ModrinthUpdateChecker-Java8");
 
-            client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenAcceptAsync(response -> {
-                        if (response.statusCode() != 200) return;
-                        JsonArray versionsArray = JsonParser.parseString(response.body()).getAsJsonArray();
-                        String latestVersion = getLatestVersion(versionsArray);
-                        if (latestVersion == null) return;
-                        consumer.accept(latestVersion);
-                    });
-        } catch (Exception ignored) {
-        }
+                int statusCode = connection.getResponseCode();
+                if (statusCode != 200) {
+                    connection.disconnect();
+                    return;
+                }
+
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+                    StringBuilder responseBuilder = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        responseBuilder.append(line);
+                    }
+
+                    JsonArray versionsArray = JsonParser.parseString(responseBuilder.toString()).getAsJsonArray();
+                    String latestVersion = getLatestVersion(versionsArray);
+                    if (latestVersion == null) return;
+                    consumer.accept(latestVersion);
+                } finally {
+                    connection.disconnect();
+                }
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     /**
@@ -104,13 +119,23 @@ public class ModrinthUpdateChecker {
      */
     @Nullable
     protected String getLatestVersion(JsonArray versions) {
-        return versions.asList().stream()
-                .map(JsonElement::getAsJsonObject)
-                .filter(this::isVersionCompatible)
-                .map(version -> version.get("version_number").getAsString())
-                .map(ModrinthUpdateChecker::getRawVersion)
-                .max(String::compareTo)
-                .orElse(null);
+        String maxVersion = null;
+
+        for (JsonElement element : versions) {
+            if (!element.isJsonObject()) continue;
+            JsonObject version = element.getAsJsonObject();
+
+            if (isVersionCompatible(version)) {
+                String versionNumber = version.get("version_number").getAsString();
+                String rawVersion = getRawVersion(versionNumber);
+
+                if (maxVersion == null || rawVersion.compareTo(maxVersion) > 0) {
+                    maxVersion = rawVersion;
+                }
+            }
+        }
+
+        return maxVersion;
     }
 
     /**
@@ -123,7 +148,7 @@ public class ModrinthUpdateChecker {
         JsonArray versions = version.get("game_versions").getAsJsonArray();
         JsonArray loaders = version.get("loaders").getAsJsonArray();
         return (minecraftVersion == null || versions.contains(new JsonPrimitive(minecraftVersion)))
-               && loaders.contains(new JsonPrimitive(loader));
+                && loaders.contains(new JsonPrimitive(loader));
     }
 
     /**
